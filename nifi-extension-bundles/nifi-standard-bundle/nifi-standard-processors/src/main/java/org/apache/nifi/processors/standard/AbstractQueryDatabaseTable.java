@@ -284,13 +284,11 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             String maxPropKey = maxProp.getKey().toLowerCase();
             String fullyQualifiedMaxPropKey = getStateKey(tableName, maxPropKey);
             if (!statePropertyMap.containsKey(fullyQualifiedMaxPropKey)) {
-                String newMaxPropValue;
                 // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                 // the value has been stored under a key that is only the column name. Fall back to check the column name,
                 // but store the new initial max value under the fully-qualified key.
-                if (statePropertyMap.containsKey(maxPropKey)) {
-                    newMaxPropValue = statePropertyMap.get(maxPropKey);
-                } else {
+                String newMaxPropValue = getStateValue(statePropertyMap, fullyQualifiedMaxPropKey, maxPropKey);
+                if (newMaxPropValue == null) {
                     newMaxPropValue = maxProp.getValue();
                 }
                 statePropertyMap.put(fullyQualifiedMaxPropKey, newMaxPropValue);
@@ -335,7 +333,12 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             }
         }
 
-        final List<String> parsedColumnNames = parseColumnNames(columnNames);
+        final List<String> parsedColumnNames;
+        if (columnNames == null) {
+            parsedColumnNames = List.of();
+        } else {
+            parsedColumnNames = Arrays.asList(columnNames.split(", "));
+        }
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
         final StopWatch stopWatch = new StopWatch(true);
@@ -563,13 +566,10 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             IntStream.range(0, maxValColumnNames.size()).forEach((index) -> {
                 String colName = maxValColumnNames.get(index);
                 String maxValueKey = getStateKey(tableName, colName);
-                String maxValue = stateMap.get(maxValueKey);
-                if (StringUtils.isEmpty(maxValue)) {
-                    // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
-                    // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
-                    // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                    maxValue = stateMap.get(colName.toLowerCase());
-                }
+                // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
+                // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
+                // maximum value is observed, it will be stored under the fully-qualified key from then on.
+                String maxValue = getStateValue(stateMap, maxValueKey, colName.toLowerCase());
                 if (!StringUtils.isEmpty(maxValue)) {
                     Integer type = columnTypeMap.get(maxValueKey);
                     if (type == null) {
@@ -592,14 +592,6 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         }
 
         return query.toString();
-    }
-
-    private List<String> parseColumnNames(String columnNamesProperty) {
-        if (columnNamesProperty == null) {
-            return List.of();
-        } else {
-            return Arrays.asList(columnNamesProperty.split(", "));
-        }
     }
 
     public class MaxValueResultSetRowCollector implements JdbcCommon.ResultSetRowCallback {
@@ -634,13 +626,10 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                         if (type == null || resultSet.getObject(i) == null) {
                             continue;
                         }
-                        String maxValueString = newColMap.get(fullyQualifiedMaxValueKey);
                         // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                         // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
                         // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                        if (StringUtils.isEmpty(maxValueString)) {
-                            maxValueString = newColMap.get(colName);
-                        }
+                        String maxValueString = getStateValue(newColMap, fullyQualifiedMaxValueKey, colName);
                         String newMaxValueString = getMaxValueFromRow(resultSet, i, type, maxValueString);
                         if (newMaxValueString != null) {
                             newColMap.put(fullyQualifiedMaxValueKey, newMaxValueString);
@@ -656,6 +645,23 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         public void applyStateChanges() {
             this.originalState.putAll(this.newColMap);
         }
+    }
+
+    /**
+     * Retrieves a state value by checking the fully-qualified state key first,
+     * then falling back to the column-only key for backward compatibility.
+     *
+     * @param stateMap the state map to retrieve from
+     * @param stateKey the fully-qualified state key (e.g., "table.column")
+     * @param columnName the column-only key (legacy format)
+     * @return the retrieved value, or null if neither key exists
+     */
+    private String getStateValue(Map<String, String> stateMap, String stateKey, String columnName) {
+        String value = stateMap.get(stateKey);
+        if (value == null) {
+            value = stateMap.get(columnName);
+        }
+        return value;
     }
 
     protected abstract SqlWriter configureSqlWriter(ProcessSession session, ProcessContext context);
