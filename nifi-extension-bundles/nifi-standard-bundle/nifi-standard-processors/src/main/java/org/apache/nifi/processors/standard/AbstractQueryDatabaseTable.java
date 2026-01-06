@@ -76,6 +76,9 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
     public static final String RESULT_TABLENAME = "tablename";
     public static final String RESULT_ROW_COUNT = "querydbtable.row.count";
 
+    private static final String MAX_VALUE_PREFIX = "maxvalue.";
+    private static final String COLUMN_DELIMITER = ", ";
+
     private static final AllowableValue TRANSACTION_READ_COMMITTED = new AllowableValue(
             String.valueOf(Connection.TRANSACTION_READ_COMMITTED),
             "TRANSACTION_READ_COMMITTED"
@@ -339,7 +342,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         if (columnNames == null) {
             parsedColumnNames = List.of();
         } else {
-            parsedColumnNames = Arrays.asList(columnNames.split(", "));
+            parsedColumnNames = Arrays.asList(columnNames.split(COLUMN_DELIMITER));
         }
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
@@ -478,7 +481,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                             // Get just the column name from the key
                             String key = entry.getKey();
                             String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
-                            newAttributesMap.put("maxvalue." + colName, entry.getValue());
+                            newAttributesMap.put(MAX_VALUE_PREFIX + colName, entry.getValue());
                         }
 
                         // Set count for all FlowFiles
