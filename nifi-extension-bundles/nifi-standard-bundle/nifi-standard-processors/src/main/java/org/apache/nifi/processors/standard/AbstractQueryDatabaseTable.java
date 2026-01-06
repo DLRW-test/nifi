@@ -335,12 +335,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             }
         }
 
-        final List<String> parsedColumnNames;
-        if (columnNames == null) {
-            parsedColumnNames = List.of();
-        } else {
-            parsedColumnNames = Arrays.asList(columnNames.split(", "));
-        }
+        final List<String> parsedColumnNames = parseColumnNames(columnNames);
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
         final StopWatch stopWatch = new StopWatch(true);
@@ -597,6 +592,14 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         }
 
         return query.toString();
+    }
+
+    private List<String> parseColumnNames(String columnNamesProperty) {
+        if (columnNamesProperty == null) {
+            return List.of();
+        } else {
+            return Arrays.asList(columnNamesProperty.split(", "));
+        }
     }
 
     public class MaxValueResultSetRowCollector implements JdbcCommon.ResultSetRowCallback {
