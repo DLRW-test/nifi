@@ -557,36 +557,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         final StringBuilder query = new StringBuilder();
         query.append(statementResponse.sql());
 
-        List<String> whereClauses = new ArrayList<>();
-        // Check state map for last max values
-        if (stateMap != null && !stateMap.isEmpty() && maxValColumnNames != null) {
-            IntStream.range(0, maxValColumnNames.size()).forEach((index) -> {
-                String colName = maxValColumnNames.get(index);
-                String maxValueKey = getStateKey(tableName, colName);
-                // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
-                // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
-                // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                String maxValue = getStateValue(stateMap, maxValueKey, colName.toLowerCase());
-                if (!StringUtils.isEmpty(maxValue)) {
-                    Integer type = columnTypeMap.get(maxValueKey);
-                    if (type == null) {
-                        // This shouldn't happen as we are populating columnTypeMap when the processor is scheduled.
-                        throw new IllegalArgumentException("No column type found for: " + colName);
-                    }
-                    // Add a condition for the WHERE clause
-                    whereClauses.add(colName + (index == 0 ? " > " : " >= ") + getLiteralByType(type, maxValue, databaseType));
-                }
-            });
-        }
-
-        if (customWhereClause != null) {
-            whereClauses.add("(" + customWhereClause + ")");
-        }
-
-        if (!whereClauses.isEmpty()) {
-            query.append(" WHERE ");
-            query.append(StringUtils.join(whereClauses, " AND "));
-        }
+        query.append(buildWhereClause(tableName, databaseType, maxValColumnNames, stateMap, customWhereClause));
 
         return query.toString();
     }
@@ -716,6 +687,40 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                 maxFragments,
                 transIsolationLevel
         );
+    }
+
+    private String buildWhereClause(String tableName, String databaseType, List<String> maxValueColumnNames, Map<String, String> maxValues, String customWhereClause) {
+        List<String> whereClauses = new ArrayList<>();
+        // Check state map for last max values
+        if (maxValues != null && !maxValues.isEmpty() && maxValueColumnNames != null) {
+            IntStream.range(0, maxValueColumnNames.size()).forEach((index) -> {
+                String colName = maxValueColumnNames.get(index);
+                String maxValueKey = getStateKey(tableName, colName);
+                // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
+                // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
+                // maximum value is observed, it will be stored under the fully-qualified key from then on.
+                String maxValue = getStateValue(maxValues, maxValueKey, colName.toLowerCase());
+                if (!StringUtils.isEmpty(maxValue)) {
+                    Integer type = columnTypeMap.get(maxValueKey);
+                    if (type == null) {
+                        // This shouldn't happen as we are populating columnTypeMap when the processor is scheduled.
+                        throw new IllegalArgumentException("No column type found for: " + colName);
+                    }
+                    // Add a condition for the WHERE clause
+                    whereClauses.add(colName + (index == 0 ? " > " : " >= ") + getLiteralByType(type, maxValue, databaseType));
+                }
+            });
+        }
+
+        if (customWhereClause != null) {
+            whereClauses.add("(" + customWhereClause + ")");
+        }
+
+        if (!whereClauses.isEmpty()) {
+            return " WHERE " + StringUtils.join(whereClauses, " AND ");
+        }
+
+        return "";
     }
 
     /**
