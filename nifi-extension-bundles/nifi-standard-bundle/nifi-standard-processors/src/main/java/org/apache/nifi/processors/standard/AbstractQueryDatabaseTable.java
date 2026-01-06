@@ -76,9 +76,6 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
     public static final String RESULT_TABLENAME = "tablename";
     public static final String RESULT_ROW_COUNT = "querydbtable.row.count";
 
-    private static final String MAX_VALUE_PREFIX = "maxvalue.";
-    private static final String COLUMN_DELIMITER = ", ";
-
     private static final AllowableValue TRANSACTION_READ_COMMITTED = new AllowableValue(
             String.valueOf(Connection.TRANSACTION_READ_COMMITTED),
             "TRANSACTION_READ_COMMITTED"
@@ -316,16 +313,16 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             final StatementResponse maxValueStatementResponse = databaseDialectService.getStatement(statementRequest);
             final String selectMaxQuery = maxValueStatementResponse.sql();
 
-            try (final Connection con = dbcpService.getConnection(Collections.emptyMap());
-                 final Statement st = con.createStatement()) {
+            try (final Connection connection = dbcpService.getConnection(Collections.emptyMap());
+                 final Statement statement = connection.createStatement()) {
 
                 if (transIsolationLevel != null) {
-                    con.setTransactionIsolation(transIsolationLevel);
+                    connection.setTransactionIsolation(transIsolationLevel);
                 }
 
-                st.setQueryTimeout(queryTimeout); // timeout in seconds
+                statement.setQueryTimeout(queryTimeout); // timeout in seconds
 
-                try (final ResultSet resultSet = st.executeQuery(selectMaxQuery)) {
+                try (final ResultSet resultSet = statement.executeQuery(selectMaxQuery)) {
                     if (resultSet.next()) {
                         final MaxValueResultSetRowCollector maxValCollector = new MaxValueResultSetRowCollector(tableName, statePropertyMap);
                         maxValCollector.processRow(resultSet);
@@ -342,19 +339,19 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         if (columnNames == null) {
             parsedColumnNames = List.of();
         } else {
-            parsedColumnNames = Arrays.asList(columnNames.split(COLUMN_DELIMITER));
+            parsedColumnNames = Arrays.asList(columnNames.split(", "));
         }
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
         final StopWatch stopWatch = new StopWatch(true);
         final String fragmentIdentifier = UUID.randomUUID().toString();
 
-        try (final Connection con = dbcpService.getConnection(Collections.emptyMap());
-             final Statement st = con.createStatement()) {
+        try (final Connection connection = dbcpService.getConnection(Collections.emptyMap());
+             final Statement statement = connection.createStatement()) {
 
             if (fetchSize != null && fetchSize > 0) {
                 try {
-                    st.setFetchSize(fetchSize);
+                    statement.setFetchSize(fetchSize);
                 } catch (SQLException se) {
                     // Not all drivers support this, just log the error (at debug level) and move on
                     logger.debug("Cannot set fetch size to {} due to {}", fetchSize, se.getLocalizedMessage(), se);
@@ -362,12 +359,12 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             }
 
             if (transIsolationLevel != null) {
-                con.setTransactionIsolation(transIsolationLevel);
+                connection.setTransactionIsolation(transIsolationLevel);
             }
 
             String jdbcURL = "DBCPService";
             try {
-                DatabaseMetaData databaseMetaData = con.getMetaData();
+                DatabaseMetaData databaseMetaData = connection.getMetaData();
                 if (databaseMetaData != null) {
                     jdbcURL = databaseMetaData.getURL();
                 }
@@ -375,17 +372,17 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                 // Ignore and use default JDBC URL. This shouldn't happen unless the driver doesn't implement getMetaData() properly
             }
 
-            st.setQueryTimeout(queryTimeout); // timeout in seconds
+            statement.setQueryTimeout(queryTimeout); // timeout in seconds
             if (logger.isDebugEnabled()) {
                 logger.debug("Executing query {}", selectQuery);
             }
 
-            final boolean originalAutoCommit = con.getAutoCommit();
+            final boolean originalAutoCommit = connection.getAutoCommit();
             final Boolean setAutoCommitValue = context.getProperty(AUTO_COMMIT).evaluateAttributeExpressions().asBoolean();
             // If user sets AUTO_COMMIT property to non-null (i.e. true or false), then the property value overrides the dbAdapter's value
             if (setAutoCommitValue != null && originalAutoCommit != setAutoCommitValue) {
                 try {
-                    con.setAutoCommit(setAutoCommitValue);
+                    connection.setAutoCommit(setAutoCommitValue);
                     logger.debug("Driver connection changed to setAutoCommit({})", setAutoCommitValue);
                 } catch (Exception ex) {
                     logger.debug("Failed to setAutoCommit({}) due to {}: {}",
@@ -393,19 +390,19 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                 }
             }
 
-            try (final ResultSet resultSet = st.executeQuery(selectQuery)) {
+            try (final ResultSet resultSet = statement.executeQuery(selectQuery)) {
                 int fragmentIndex = 0;
                 // Max values will be updated in the state property map by the callback
                 final MaxValueResultSetRowCollector maxValCollector = new MaxValueResultSetRowCollector(tableName, statePropertyMap);
 
                 while (true) {
-                    final AtomicLong nrOfRows = new AtomicLong(0L);
+                    final AtomicLong rowCount = new AtomicLong(0L);
 
                     FlowFile fileToProcess = session.create();
                     try {
                         fileToProcess = session.write(fileToProcess, out -> {
                             try {
-                                nrOfRows.set(sqlWriter.writeResultSet(resultSet, out, getLogger(), maxValCollector));
+                                rowCount.set(sqlWriter.writeResultSet(resultSet, out, getLogger(), maxValCollector));
                             } catch (Exception e) {
                                 throw new ProcessException("Error during database query or conversion of records.", e);
                             }
@@ -416,10 +413,10 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                         throw e;
                     }
 
-                    if (nrOfRows.get() > 0) {
+                    if (rowCount.get() > 0) {
                         // set attributes
                         final Map<String, String> attributesToAdd = new HashMap<>();
-                        attributesToAdd.put(RESULT_ROW_COUNT, String.valueOf(nrOfRows.get()));
+                        attributesToAdd.put(RESULT_ROW_COUNT, String.valueOf(rowCount.get()));
                         attributesToAdd.put(RESULT_TABLENAME, tableName);
 
                         if (maxRowsPerFlowFile > 0) {
@@ -432,7 +429,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                         sqlWriter.updateCounters(session);
 
                         logger.debug("{} contains {} records; transferring to 'success'",
-                                fileToProcess, nrOfRows.get());
+                                fileToProcess, rowCount.get());
 
                         session.getProvenanceReporter().receive(fileToProcess, jdbcURL, stopWatch.getElapsed(TimeUnit.MILLISECONDS));
                         resultSetFlowFiles.add(fileToProcess);
@@ -463,7 +460,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                     }
 
                     // If we are splitting up the data into flow files, don't loop back around if we've gotten all results
-                    if (maxRowsPerFlowFile > 0 && nrOfRows.get() < maxRowsPerFlowFile) {
+                    if (maxRowsPerFlowFile > 0 && rowCount.get() < maxRowsPerFlowFile) {
                         break;
                     }
                 }
@@ -481,7 +478,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                             // Get just the column name from the key
                             String key = entry.getKey();
                             String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
-                            newAttributesMap.put(MAX_VALUE_PREFIX + colName, entry.getValue());
+                            newAttributesMap.put("maxvalue." + colName, entry.getValue());
                         }
 
                         // Set count for all FlowFiles
@@ -495,9 +492,9 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             } catch (final SQLException e) {
                 throw e;
             } finally {
-                if (con.getAutoCommit() != originalAutoCommit) {
+                if (connection.getAutoCommit() != originalAutoCommit) {
                     try {
-                        con.setAutoCommit(originalAutoCommit);
+                        connection.setAutoCommit(originalAutoCommit);
                         logger.debug("Driver connection reset to original setAutoCommit({})", originalAutoCommit);
                     } catch (Exception ex) {
                         logger.debug("Failed to setAutoCommit({}) due to {}: {}",
@@ -624,9 +621,9 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             try {
                 // Iterate over the row, check-and-set max values
                 final ResultSetMetaData meta = resultSet.getMetaData();
-                final int nrOfColumns = meta.getColumnCount();
-                if (nrOfColumns > 0) {
-                    for (int i = 1; i <= nrOfColumns; i++) {
+                final int columnCount = meta.getColumnCount();
+                if (columnCount > 0) {
+                    for (int i = 1; i <= columnCount; i++) {
                         String colName = meta.getColumnName(i).toLowerCase();
                         String fullyQualifiedMaxValueKey = getStateKey(tableName, colName);
                         Integer type = columnTypeMap.get(fullyQualifiedMaxValueKey);
