@@ -284,11 +284,13 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             String maxPropKey = maxProp.getKey().toLowerCase();
             String fullyQualifiedMaxPropKey = getStateKey(tableName, maxPropKey);
             if (!statePropertyMap.containsKey(fullyQualifiedMaxPropKey)) {
+                String newMaxPropValue;
                 // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                 // the value has been stored under a key that is only the column name. Fall back to check the column name,
                 // but store the new initial max value under the fully-qualified key.
-                String newMaxPropValue = getStateValue(statePropertyMap, fullyQualifiedMaxPropKey, maxPropKey);
-                if (newMaxPropValue == null) {
+                if (statePropertyMap.containsKey(maxPropKey)) {
+                    newMaxPropValue = statePropertyMap.get(maxPropKey);
+                } else {
                     newMaxPropValue = maxProp.getValue();
                 }
                 statePropertyMap.put(fullyQualifiedMaxPropKey, newMaxPropValue);
@@ -333,12 +335,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             }
         }
 
-        final List<String> parsedColumnNames;
-        if (columnNames == null) {
-            parsedColumnNames = List.of();
-        } else {
-            parsedColumnNames = Arrays.asList(columnNames.split(", "));
-        }
+        final List<String> parsedColumnNames = parseColumnNames(columnNames);
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
         final StopWatch stopWatch = new StopWatch(true);
@@ -469,21 +466,7 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                 // Even though the maximum value and total count are known at this point, to maintain consistent behavior if Output Batch Size is set, do not store the attributes
                 if (outputBatchSize == 0) {
                     for (int i = 0; i < resultSetFlowFiles.size(); i++) {
-                        final Map<String, String> newAttributesMap = new HashMap<>();
-
-                        // Add maximum values as attributes
-                        for (Map.Entry<String, String> entry : statePropertyMap.entrySet()) {
-                            // Get just the column name from the key
-                            String key = entry.getKey();
-                            String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
-                            newAttributesMap.put("maxvalue." + colName, entry.getValue());
-                        }
-
-                        // Set count for all FlowFiles
-                        if (maxRowsPerFlowFile > 0) {
-                            newAttributesMap.put(FRAGMENT_COUNT, Integer.toString(fragmentIndex));
-                        }
-
+                        final Map<String, String> newAttributesMap = buildQueryResultAttributes(statePropertyMap, maxRowsPerFlowFile, fragmentIndex, stateMap);
                         resultSetFlowFiles.set(i, session.putAllAttributes(resultSetFlowFiles.get(i), newAttributesMap));
                     }
                 }
@@ -566,10 +549,13 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             IntStream.range(0, maxValColumnNames.size()).forEach((index) -> {
                 String colName = maxValColumnNames.get(index);
                 String maxValueKey = getStateKey(tableName, colName);
-                // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
-                // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
-                // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                String maxValue = getStateValue(stateMap, maxValueKey, colName.toLowerCase());
+                String maxValue = stateMap.get(maxValueKey);
+                if (StringUtils.isEmpty(maxValue)) {
+                    // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
+                    // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
+                    // maximum value is observed, it will be stored under the fully-qualified key from then on.
+                    maxValue = stateMap.get(colName.toLowerCase());
+                }
                 if (!StringUtils.isEmpty(maxValue)) {
                     Integer type = columnTypeMap.get(maxValueKey);
                     if (type == null) {
@@ -592,6 +578,33 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         }
 
         return query.toString();
+    }
+
+    private List<String> parseColumnNames(String columnNamesProperty) {
+        if (columnNamesProperty == null) {
+            return List.of();
+        } else {
+            return Arrays.asList(columnNamesProperty.split(", "));
+        }
+    }
+
+    private Map<String, String> buildQueryResultAttributes(Map<String, String> maxValueProperties, long rowCount, int fragmentIndex, StateMap stateMap) {
+        final Map<String, String> newAttributesMap = new HashMap<>();
+
+        // Add maximum values as attributes
+        for (Map.Entry<String, String> entry : maxValueProperties.entrySet()) {
+            // Get just the column name from the key
+            String key = entry.getKey();
+            String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
+            newAttributesMap.put("maxvalue." + colName, entry.getValue());
+        }
+
+        // Set count for all FlowFiles
+        if (rowCount > 0) {
+            newAttributesMap.put(FRAGMENT_COUNT, Integer.toString(fragmentIndex));
+        }
+
+        return newAttributesMap;
     }
 
     public class MaxValueResultSetRowCollector implements JdbcCommon.ResultSetRowCallback {
@@ -626,10 +639,13 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                         if (type == null || resultSet.getObject(i) == null) {
                             continue;
                         }
+                        String maxValueString = newColMap.get(fullyQualifiedMaxValueKey);
                         // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                         // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
                         // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                        String maxValueString = getStateValue(newColMap, fullyQualifiedMaxValueKey, colName);
+                        if (StringUtils.isEmpty(maxValueString)) {
+                            maxValueString = newColMap.get(colName);
+                        }
                         String newMaxValueString = getMaxValueFromRow(resultSet, i, type, maxValueString);
                         if (newMaxValueString != null) {
                             newColMap.put(fullyQualifiedMaxValueKey, newMaxValueString);
@@ -645,23 +661,6 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         public void applyStateChanges() {
             this.originalState.putAll(this.newColMap);
         }
-    }
-
-    /**
-     * Retrieves a state value by checking the fully-qualified state key first,
-     * then falling back to the column-only key for backward compatibility.
-     *
-     * @param stateMap the state map to retrieve from
-     * @param stateKey the fully-qualified state key (e.g., "table.column")
-     * @param columnName the column-only key (legacy format)
-     * @return the retrieved value, or null if neither key exists
-     */
-    private String getStateValue(Map<String, String> stateMap, String stateKey, String columnName) {
-        String value = stateMap.get(stateKey);
-        if (value == null) {
-            value = stateMap.get(columnName);
-        }
-        return value;
     }
 
     protected abstract SqlWriter configureSqlWriter(ProcessSession session, ProcessContext context);
