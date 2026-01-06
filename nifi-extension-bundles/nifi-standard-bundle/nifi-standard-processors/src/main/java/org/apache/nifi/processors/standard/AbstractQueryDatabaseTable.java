@@ -528,6 +528,22 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         config.renameProperty("initial-load-strategy", INITIAL_LOAD_STRATEGY.getName());
     }
 
+    /**
+     * Constructs the SQL SELECT query for fetching database rows.
+     * Builds a query using the database dialect service and appends WHERE clause conditions
+     * based on maximum value tracking and custom filters.
+     *
+     * @param databaseDialectService the database dialect service used to generate dialect-specific SQL
+     * @param databaseType the database type (e.g., "Oracle", "MySQL") for type-specific formatting
+     * @param tableName the name of the database table to query (required, non-null)
+     * @param sqlQuery optional custom SQL query to use as a derived table
+     * @param columnNames list of column names to include in the SELECT clause (empty list selects all columns)
+     * @param maxValColumnNames list of column names used for maximum value tracking (may be null)
+     * @param customWhereClause optional custom WHERE clause to append to the query
+     * @param stateMap map containing current state values for maximum value columns
+     * @return the complete SQL SELECT query string with WHERE clause conditions
+     * @throws IllegalArgumentException if tableName is null or empty
+     */
     private String getQuery(
             final DatabaseDialectService databaseDialectService,
             final String databaseType,
@@ -617,7 +633,26 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
 
     /**
      * Data class to hold query configuration properties extracted from ProcessContext.
-     * This record encapsulates all configuration values needed for query execution.
+     * This record encapsulates all configuration values needed for query execution,
+     * preserving the exact evaluation order of expression language properties to ensure
+     * consistent behavior with the original inline code.
+     *
+     * @param dbcpService the database connection pool service for obtaining connections (non-null)
+     * @param databaseDialectService the database dialect service for generating SQL (non-null)
+     * @param databaseType the database type identifier (e.g., "Oracle", "MySQL")
+     * @param tableName the name of the database table to query
+     * @param columnNames comma-separated list of column names to retrieve (may be null for all columns)
+     * @param sqlQuery optional custom SQL query to use as a derived table
+     * @param maxValueColumnNames comma-separated list of column names for maximum value tracking
+     * @param initialLoadStrategy strategy for handling existing rows on first execution
+     * @param customWhereClause optional custom WHERE clause to append to queries
+     * @param queryTimeout query timeout in seconds
+     * @param fetchSize JDBC fetch size hint for result set retrieval
+     * @param maxRowsPerFlowFile maximum number of rows per output FlowFile (0 for unlimited)
+     * @param outputBatchSizeField raw output batch size value from property
+     * @param outputBatchSize output batch size (normalized, 0 if null)
+     * @param maxFragments maximum number of fragments to generate (0 for unlimited)
+     * @param transIsolationLevel JDBC transaction isolation level (may be null)
      */
     private record QueryConfiguration(
             DBCPService dbcpService,
@@ -640,12 +675,14 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
 
     /**
      * Extracts query configuration properties from the ProcessContext.
-     * This method preserves the exact evaluation order of expression language properties
-     * to ensure consistent behavior with the original inline code.
+     * This method consolidates all property retrieval and evaluation in one place,
+     * preserving the exact evaluation order of expression language properties to ensure
+     * consistent behavior with the original inline code. This extraction improves code
+     * maintainability by centralizing configuration logic.
      *
-     * @param context the ProcessContext to extract properties from
-     * @param stateMap the StateMap (included for method signature consistency, not used in extraction)
-     * @return QueryConfiguration containing all extracted property values
+     * @param context the ProcessContext to extract properties from (non-null)
+     * @param stateMap the StateMap (included for method signature consistency, currently unused)
+     * @return QueryConfiguration containing all extracted property values with expression language evaluated
      */
     private QueryConfiguration extractQueryConfiguration(ProcessContext context, StateMap stateMap) {
         final DBCPService dbcpService = context.getProperty(DBCP_SERVICE).asControllerService(DBCPService.class);
@@ -689,6 +726,20 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         );
     }
 
+    /**
+     * Builds the WHERE clause portion of the SQL query based on maximum value tracking and custom filters.
+     * Constructs conditions for incremental fetching using maximum values from previous executions,
+     * with the first column using '>' (greater than) and subsequent columns using '>=' (greater than or equal).
+     * This hierarchical approach supports partitioned tables with multiple tracking columns.
+     *
+     * @param tableName the name of the table being queried (used for state key construction)
+     * @param databaseType the database type for formatting literals (e.g., "Oracle", "MySQL")
+     * @param maxValueColumnNames list of column names to track for incremental fetch (may be null)
+     * @param maxValues map of current state values for maximum value columns (may be null or empty)
+     * @param customWhereClause optional custom WHERE clause to combine with generated conditions (may be null)
+     * @return the complete WHERE clause string (including " WHERE " prefix), or empty string if no conditions
+     * @throws IllegalArgumentException if column type is not found in columnTypeMap for a max value column
+     */
     private String buildWhereClause(String tableName, String databaseType, List<String> maxValueColumnNames, Map<String, String> maxValues, String customWhereClause) {
         List<String> whereClauses = new ArrayList<>();
         // Check state map for last max values
@@ -726,11 +777,13 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
     /**
      * Retrieves a state value by checking the fully-qualified state key first,
      * then falling back to the column-only key for backward compatibility.
+     * This dual-lookup strategy ensures compatibility with state maps created by earlier
+     * versions of the processor that stored values using only column names as keys.
      *
-     * @param stateMap the state map to retrieve from
-     * @param stateKey the fully-qualified state key (e.g., "table.column")
-     * @param columnName the column-only key (legacy format)
-     * @return the retrieved value, or null if neither key exists
+     * @param stateMap the state map to retrieve from (non-null)
+     * @param stateKey the fully-qualified state key (e.g., "tablename@!@columnname")
+     * @param columnName the column-only key for legacy format fallback (may be null)
+     * @return the retrieved value from either key, or null if neither key exists in the map
      */
     private String getStateValue(Map<String, String> stateMap, String stateKey, String columnName) {
         String value = stateMap.get(stateKey);

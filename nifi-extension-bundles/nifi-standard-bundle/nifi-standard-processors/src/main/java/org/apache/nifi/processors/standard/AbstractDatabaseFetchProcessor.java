@@ -317,6 +317,18 @@ public abstract class AbstractDatabaseFetchProcessor extends AbstractSessionFact
         return DatabaseAdapterDescriptor.getDatabaseDialectService(context, DATABASE_DIALECT_SERVICE, databaseType);
     }
 
+    /**
+     * Constructs a query statement request for retrieving column metadata without fetching actual data.
+     * Creates a SELECT query with a WHERE clause that returns zero rows ("1 = 0"), which is used
+     * to obtain column metadata (names and types) from the database without the overhead of
+     * transferring result data. This approach works with schema-on-read systems like Apache Drill
+     * that may not fully support DatabaseMetaData.getColumns().
+     *
+     * @param tableName the name of the table to query (non-null)
+     * @param maxValueColumnNames comma-separated list of column names to include in the SELECT clause (non-null)
+     * @param derivedTableQuery optional custom SQL query to use as a derived table (may be null)
+     * @return a QueryStatementRequest configured to retrieve metadata for the specified columns
+     */
     private QueryStatementRequest getMaxValueStatementRequest(final String tableName, final String maxValueColumnNames, final String derivedTableQuery) {
         final List<ColumnDefinition> maxValueColumns = Arrays.stream(maxValueColumnNames.split(","))
                 .map(StandardColumnDefinition::new)
