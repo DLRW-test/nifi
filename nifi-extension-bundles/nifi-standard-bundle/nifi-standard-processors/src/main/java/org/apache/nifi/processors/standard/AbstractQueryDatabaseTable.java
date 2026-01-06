@@ -242,29 +242,6 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
 
         final ComponentLog logger = getLogger();
 
-        final DBCPService dbcpService = context.getProperty(DBCP_SERVICE).asControllerService(DBCPService.class);
-        final DatabaseDialectService databaseDialectService = getDatabaseDialectService(context);
-        final String databaseType = context.getProperty(DB_TYPE).getValue();
-        final String tableName = context.getProperty(TABLE_NAME).evaluateAttributeExpressions().getValue();
-        final String columnNames = context.getProperty(COLUMN_NAMES).evaluateAttributeExpressions().getValue();
-        final String sqlQuery = context.getProperty(SQL_QUERY).evaluateAttributeExpressions().getValue();
-        final String maxValueColumnNames = context.getProperty(MAX_VALUE_COLUMN_NAMES).evaluateAttributeExpressions().getValue();
-        final String initialLoadStrategy = context.getProperty(INITIAL_LOAD_STRATEGY).getValue();
-        final String customWhereClause = context.getProperty(WHERE_CLAUSE).evaluateAttributeExpressions().getValue();
-        final Integer queryTimeout = context.getProperty(QUERY_TIMEOUT).evaluateAttributeExpressions().asTimePeriod(TimeUnit.SECONDS).intValue();
-        final Integer fetchSize = context.getProperty(FETCH_SIZE).evaluateAttributeExpressions().asInteger();
-        final Integer maxRowsPerFlowFile = context.getProperty(MAX_ROWS_PER_FLOW_FILE).evaluateAttributeExpressions().asInteger();
-        final Integer outputBatchSizeField = context.getProperty(OUTPUT_BATCH_SIZE).evaluateAttributeExpressions().asInteger();
-        final int outputBatchSize = outputBatchSizeField == null ? 0 : outputBatchSizeField;
-        final Integer maxFragments = context.getProperty(MAX_FRAGMENTS).isSet()
-                ? context.getProperty(MAX_FRAGMENTS).evaluateAttributeExpressions().asInteger()
-                : 0;
-        final Integer transIsolationLevel = context.getProperty(TRANS_ISOLATION_LEVEL).isSet()
-                ? context.getProperty(TRANS_ISOLATION_LEVEL).asInteger()
-                : null;
-
-        SqlWriter sqlWriter = configureSqlWriter(session, context);
-
         final StateMap stateMap;
         try {
             stateMap = session.getState(Scope.CLUSTER);
@@ -275,6 +252,26 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             return;
         }
 
+        // Extract query configuration properties
+        final QueryConfiguration config = extractQueryConfiguration(context, stateMap);
+        final DBCPService dbcpService = config.dbcpService();
+        final DatabaseDialectService databaseDialectService = config.databaseDialectService();
+        final String databaseType = config.databaseType();
+        final String tableName = config.tableName();
+        final String columnNames = config.columnNames();
+        final String sqlQuery = config.sqlQuery();
+        final String maxValueColumnNames = config.maxValueColumnNames();
+        final String initialLoadStrategy = config.initialLoadStrategy();
+        final String customWhereClause = config.customWhereClause();
+        final Integer queryTimeout = config.queryTimeout();
+        final Integer fetchSize = config.fetchSize();
+        final Integer maxRowsPerFlowFile = config.maxRowsPerFlowFile();
+        final int outputBatchSize = config.outputBatchSize();
+        final Integer maxFragments = config.maxFragments();
+        final Integer transIsolationLevel = config.transIsolationLevel();
+
+        SqlWriter sqlWriter = configureSqlWriter(session, context);
+
         // Make a mutable copy of the current state property map. This will be updated by the result row callback, and eventually
         // set as the current state map (after the session has been committed)
         final Map<String, String> statePropertyMap = new HashMap<>(stateMap.toMap());
@@ -284,13 +281,11 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             String maxPropKey = maxProp.getKey().toLowerCase();
             String fullyQualifiedMaxPropKey = getStateKey(tableName, maxPropKey);
             if (!statePropertyMap.containsKey(fullyQualifiedMaxPropKey)) {
-                String newMaxPropValue;
                 // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                 // the value has been stored under a key that is only the column name. Fall back to check the column name,
                 // but store the new initial max value under the fully-qualified key.
-                if (statePropertyMap.containsKey(maxPropKey)) {
-                    newMaxPropValue = statePropertyMap.get(maxPropKey);
-                } else {
+                String newMaxPropValue = getStateValue(statePropertyMap, fullyQualifiedMaxPropKey, maxPropKey);
+                if (newMaxPropValue == null) {
                     newMaxPropValue = maxProp.getValue();
                 }
                 statePropertyMap.put(fullyQualifiedMaxPropKey, newMaxPropValue);
@@ -335,7 +330,12 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             }
         }
 
-        final List<String> parsedColumnNames = parseColumnNames(columnNames);
+        final List<String> parsedColumnNames;
+        if (columnNames == null) {
+            parsedColumnNames = List.of();
+        } else {
+            parsedColumnNames = Arrays.asList(columnNames.split(", "));
+        }
 
         final String selectQuery = getQuery(databaseDialectService, databaseType, tableName, sqlQuery, parsedColumnNames, maxValueColumnNameList, customWhereClause, statePropertyMap);
         final StopWatch stopWatch = new StopWatch(true);
@@ -466,7 +466,21 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                 // Even though the maximum value and total count are known at this point, to maintain consistent behavior if Output Batch Size is set, do not store the attributes
                 if (outputBatchSize == 0) {
                     for (int i = 0; i < resultSetFlowFiles.size(); i++) {
-                        final Map<String, String> newAttributesMap = buildQueryResultAttributes(statePropertyMap, maxRowsPerFlowFile, fragmentIndex, stateMap);
+                        final Map<String, String> newAttributesMap = new HashMap<>();
+
+                        // Add maximum values as attributes
+                        for (Map.Entry<String, String> entry : statePropertyMap.entrySet()) {
+                            // Get just the column name from the key
+                            String key = entry.getKey();
+                            String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
+                            newAttributesMap.put("maxvalue." + colName, entry.getValue());
+                        }
+
+                        // Set count for all FlowFiles
+                        if (maxRowsPerFlowFile > 0) {
+                            newAttributesMap.put(FRAGMENT_COUNT, Integer.toString(fragmentIndex));
+                        }
+
                         resultSetFlowFiles.set(i, session.putAllAttributes(resultSetFlowFiles.get(i), newAttributesMap));
                     }
                 }
@@ -549,13 +563,10 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
             IntStream.range(0, maxValColumnNames.size()).forEach((index) -> {
                 String colName = maxValColumnNames.get(index);
                 String maxValueKey = getStateKey(tableName, colName);
-                String maxValue = stateMap.get(maxValueKey);
-                if (StringUtils.isEmpty(maxValue)) {
-                    // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
-                    // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
-                    // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                    maxValue = stateMap.get(colName.toLowerCase());
-                }
+                // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
+                // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
+                // maximum value is observed, it will be stored under the fully-qualified key from then on.
+                String maxValue = getStateValue(stateMap, maxValueKey, colName.toLowerCase());
                 if (!StringUtils.isEmpty(maxValue)) {
                     Integer type = columnTypeMap.get(maxValueKey);
                     if (type == null) {
@@ -578,33 +589,6 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         }
 
         return query.toString();
-    }
-
-    private List<String> parseColumnNames(String columnNamesProperty) {
-        if (columnNamesProperty == null) {
-            return List.of();
-        } else {
-            return Arrays.asList(columnNamesProperty.split(", "));
-        }
-    }
-
-    private Map<String, String> buildQueryResultAttributes(Map<String, String> maxValueProperties, long rowCount, int fragmentIndex, StateMap stateMap) {
-        final Map<String, String> newAttributesMap = new HashMap<>();
-
-        // Add maximum values as attributes
-        for (Map.Entry<String, String> entry : maxValueProperties.entrySet()) {
-            // Get just the column name from the key
-            String key = entry.getKey();
-            String colName = key.substring(key.lastIndexOf(NAMESPACE_DELIMITER) + NAMESPACE_DELIMITER.length());
-            newAttributesMap.put("maxvalue." + colName, entry.getValue());
-        }
-
-        // Set count for all FlowFiles
-        if (rowCount > 0) {
-            newAttributesMap.put(FRAGMENT_COUNT, Integer.toString(fragmentIndex));
-        }
-
-        return newAttributesMap;
     }
 
     public class MaxValueResultSetRowCollector implements JdbcCommon.ResultSetRowCallback {
@@ -639,13 +623,10 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
                         if (type == null || resultSet.getObject(i) == null) {
                             continue;
                         }
-                        String maxValueString = newColMap.get(fullyQualifiedMaxValueKey);
                         // If we can't find the value at the fully-qualified key name, it is possible (under a previous scheme)
                         // the value has been stored under a key that is only the column name. Fall back to check the column name; either way, when a new
                         // maximum value is observed, it will be stored under the fully-qualified key from then on.
-                        if (StringUtils.isEmpty(maxValueString)) {
-                            maxValueString = newColMap.get(colName);
-                        }
+                        String maxValueString = getStateValue(newColMap, fullyQualifiedMaxValueKey, colName);
                         String newMaxValueString = getMaxValueFromRow(resultSet, i, type, maxValueString);
                         if (newMaxValueString != null) {
                             newColMap.put(fullyQualifiedMaxValueKey, newMaxValueString);
@@ -661,6 +642,97 @@ public abstract class AbstractQueryDatabaseTable extends AbstractDatabaseFetchPr
         public void applyStateChanges() {
             this.originalState.putAll(this.newColMap);
         }
+    }
+
+    /**
+     * Data class to hold query configuration properties extracted from ProcessContext.
+     * This record encapsulates all configuration values needed for query execution.
+     */
+    private record QueryConfiguration(
+            DBCPService dbcpService,
+            DatabaseDialectService databaseDialectService,
+            String databaseType,
+            String tableName,
+            String columnNames,
+            String sqlQuery,
+            String maxValueColumnNames,
+            String initialLoadStrategy,
+            String customWhereClause,
+            Integer queryTimeout,
+            Integer fetchSize,
+            Integer maxRowsPerFlowFile,
+            Integer outputBatchSizeField,
+            int outputBatchSize,
+            Integer maxFragments,
+            Integer transIsolationLevel
+    ) {}
+
+    /**
+     * Extracts query configuration properties from the ProcessContext.
+     * This method preserves the exact evaluation order of expression language properties
+     * to ensure consistent behavior with the original inline code.
+     *
+     * @param context the ProcessContext to extract properties from
+     * @param stateMap the StateMap (included for method signature consistency, not used in extraction)
+     * @return QueryConfiguration containing all extracted property values
+     */
+    private QueryConfiguration extractQueryConfiguration(ProcessContext context, StateMap stateMap) {
+        final DBCPService dbcpService = context.getProperty(DBCP_SERVICE).asControllerService(DBCPService.class);
+        final DatabaseDialectService databaseDialectService = getDatabaseDialectService(context);
+        final String databaseType = context.getProperty(DB_TYPE).getValue();
+        final String tableName = context.getProperty(TABLE_NAME).evaluateAttributeExpressions().getValue();
+        final String columnNames = context.getProperty(COLUMN_NAMES).evaluateAttributeExpressions().getValue();
+        final String sqlQuery = context.getProperty(SQL_QUERY).evaluateAttributeExpressions().getValue();
+        final String maxValueColumnNames = context.getProperty(MAX_VALUE_COLUMN_NAMES).evaluateAttributeExpressions().getValue();
+        final String initialLoadStrategy = context.getProperty(INITIAL_LOAD_STRATEGY).getValue();
+        final String customWhereClause = context.getProperty(WHERE_CLAUSE).evaluateAttributeExpressions().getValue();
+        final Integer queryTimeout = context.getProperty(QUERY_TIMEOUT).evaluateAttributeExpressions().asTimePeriod(TimeUnit.SECONDS).intValue();
+        final Integer fetchSize = context.getProperty(FETCH_SIZE).evaluateAttributeExpressions().asInteger();
+        final Integer maxRowsPerFlowFile = context.getProperty(MAX_ROWS_PER_FLOW_FILE).evaluateAttributeExpressions().asInteger();
+        final Integer outputBatchSizeField = context.getProperty(OUTPUT_BATCH_SIZE).evaluateAttributeExpressions().asInteger();
+        final int outputBatchSize = outputBatchSizeField == null ? 0 : outputBatchSizeField;
+        final Integer maxFragments = context.getProperty(MAX_FRAGMENTS).isSet()
+                ? context.getProperty(MAX_FRAGMENTS).evaluateAttributeExpressions().asInteger()
+                : 0;
+        final Integer transIsolationLevel = context.getProperty(TRANS_ISOLATION_LEVEL).isSet()
+                ? context.getProperty(TRANS_ISOLATION_LEVEL).asInteger()
+                : null;
+
+        return new QueryConfiguration(
+                dbcpService,
+                databaseDialectService,
+                databaseType,
+                tableName,
+                columnNames,
+                sqlQuery,
+                maxValueColumnNames,
+                initialLoadStrategy,
+                customWhereClause,
+                queryTimeout,
+                fetchSize,
+                maxRowsPerFlowFile,
+                outputBatchSizeField,
+                outputBatchSize,
+                maxFragments,
+                transIsolationLevel
+        );
+    }
+
+    /**
+     * Retrieves a state value by checking the fully-qualified state key first,
+     * then falling back to the column-only key for backward compatibility.
+     *
+     * @param stateMap the state map to retrieve from
+     * @param stateKey the fully-qualified state key (e.g., "table.column")
+     * @param columnName the column-only key (legacy format)
+     * @return the retrieved value, or null if neither key exists
+     */
+    private String getStateValue(Map<String, String> stateMap, String stateKey, String columnName) {
+        String value = stateMap.get(stateKey);
+        if (value == null) {
+            value = stateMap.get(columnName);
+        }
+        return value;
     }
 
     protected abstract SqlWriter configureSqlWriter(ProcessSession session, ProcessContext context);
