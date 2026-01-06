@@ -256,8 +256,8 @@ public abstract class AbstractDatabaseFetchProcessor extends AbstractSessionFact
             final String tableName = context.getProperty(TABLE_NAME).evaluateAttributeExpressions(flowFile).getValue();
             final String sqlQuery = context.getProperty(SQL_QUERY).evaluateAttributeExpressions().getValue();
 
-            try (final Connection con = dbcpService.getConnection(flowFile == null ? Collections.emptyMap() : flowFile.getAttributes());
-                 final Statement st = con.createStatement()) {
+            try (final Connection connection = dbcpService.getConnection(flowFile == null ? Collections.emptyMap() : flowFile.getAttributes());
+                 final Statement statement = connection.createStatement()) {
 
                 // Try a query that returns no rows, for the purposes of getting metadata about the columns. It is possible
                 // to use DatabaseMetaData.getColumns(), but not all drivers support this, notably the schema-on-read
@@ -266,10 +266,10 @@ public abstract class AbstractDatabaseFetchProcessor extends AbstractSessionFact
                 final StatementResponse statementResponse = databaseDialectService.getStatement(statementRequest);
                 final String query = statementResponse.sql();
 
-                ResultSet resultSet = st.executeQuery(query);
+                ResultSet resultSet = statement.executeQuery(query);
                 ResultSetMetaData resultSetMetaData = resultSet.getMetaData();
-                int numCols = resultSetMetaData.getColumnCount();
-                if (numCols > 0) {
+                int columnCount = resultSetMetaData.getColumnCount();
+                if (columnCount > 0) {
                     if (shouldCleanCache) {
                         columnTypeMap.clear();
                     }
@@ -282,7 +282,7 @@ public abstract class AbstractDatabaseFetchProcessor extends AbstractSessionFact
                         maxValueQualifiedColumnNameList.add(colKey);
                     }
 
-                    for (int i = 1; i <= numCols; i++) {
+                    for (int i = 1; i <= columnCount; i++) {
                         String colName = resultSetMetaData.getColumnName(i).toLowerCase();
                         String colKey = getStateKey(tableName, colName);
 
